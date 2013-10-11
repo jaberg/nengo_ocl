@@ -131,6 +131,10 @@ class TestStuff(unittest.TestCase):
         # self._test_random(k=4, p=4, m=550, n=550)
         self._test_random(k=4, p=4, m=2000, n=1000)
 
+    def test_many_dots_one_huge(self):
+        # self._test_random(k=4, p=4, m=550, n=550)
+        self._test_random(k=1, p=1000, m=2000, n=2)
+
 
 def check_from_shapes(
     planner,

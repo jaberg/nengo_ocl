@@ -1,3 +1,15 @@
+"""
+Usage: ./benchmark_circconv.py {ref,ocl} <dims>
+
+dims is comma-separated string of convolution sizes to try.
+
+E.g.
+    ./benchmark_circconv.py ocl 10,50,100   # runs 3 tests on the OCL simulator 
+
+This script prints the results to stdout and writes them in pkl format to 
+a file called  records_circconv_TIMESTAMP.pkl
+
+"""
 
 import sys
 import datetime

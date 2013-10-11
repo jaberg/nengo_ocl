@@ -642,7 +642,7 @@ def many_dots_impl(p, items):
     # - to increase occupancy when there are not so many vectors Y
     # - to handle long vectors Y
 
-    #p.print_geometry_summary(items)
+    p.print_geometry_summary(items)
 
     if p.clra_alpha is not None:
         raise NotImplementedError()
@@ -782,6 +782,190 @@ def many_dots_impl(p, items):
                 = y_sum_pre[segment_idx]
                   + ${float_alpha} * y_sum_post[0][segment_idx];
         //printf("Yout=%f\\n", Y_data[${y_offset} + get_global_id(0)]);
+        }
+    }
+        """
+
+    text = Template(text, output_encoding='ascii').render(**textconf)
+
+    fn = cl.Program(p.queue.context, text).build().fn
+
+    full_args = [
+                 cl_gstructure,
+                 p.A.cl_buf,
+                 p.X.cl_buf,
+                 ]
+    if p.cl_beta is not None:
+        full_args += [p.cl_beta]
+    full_args += [
+                 p.Y_in.cl_buf,
+                 p.Y.cl_buf,
+                ]
+
+    fn.set_args(*[arr.data for arr in full_args])
+    rval = Plan(p.queue, fn, gsize, lsize,
+        name='clra_gemv.many_dots_impl',
+        tag=p.tag,
+        bw_per_call=bw_from_geometry(p.geometry, items),
+        flops_per_call=flops_from_geometry(p.geometry, items),
+        )
+    rval.full_args = full_args  # prevent GC the args
+    return rval
+
+
+def many_broad_dots_impl(p, items):
+    # target use case:
+    # * several very shallow gemvs (short inner prods) into each target
+    # * not all targets have the same size
+
+    #
+    # This algorithm is blocked out so that a work-group [i, j] computes
+    # some segment of an output vector:
+    # e.g. Y[i][ 32 * j : 32 * (j + 1)]
+    #
+    # This is done for two reasons:
+    # - to increase occupancy when there are not so many vectors Y
+    # - to handle long vectors Y
+
+    p.print_geometry_summary(items)
+
+    if p.clra_alpha is not None:
+        raise NotImplementedError()
+    if p.clra_gamma is not None:
+        raise NotImplementedError()
+    if p.clra_beta is not None:
+        raise NotImplementedError()
+    if p.cl_alpha is not None:
+        raise NotImplementedError()
+    if p.cl_gamma is not None:
+        raise NotImplementedError()
+    if not all(s == 1 for s in p.A.stride1s):
+        raise NotImplementedError()
+
+    assert p.float_alpha is not None
+    assert p.float_gamma is not None
+
+    if p.A_js is None:
+        # -- easy probably, but not done
+        raise NotImplementedError()
+    A_js_shape0s = p.A_js.shape0s
+    cl_gstructure, textconf = p.cl_geometry_and_textconf(items)
+
+    #min_n_dots = min(A_js_shape0s)
+    max_n_dots = max(A_js_shape0s)
+
+
+    max_y_len = max(p.geometry[ii]['y_len'] for ii in items)
+    MAX_SEGMENT_SIZE = 16 # tricky to tune?
+
+    segment_size = min(
+        max_y_len,
+        MAX_SEGMENT_SIZE)
+    dot_block_size = min(
+        max_n_dots,
+        int(p.queue.device.max_work_group_size / segment_size),
+        )
+
+    n_segments = int(math.ceil(float(max_y_len) / segment_size))
+    gsize = (n_segments * segment_size, dot_block_size, len(items))
+    lsize = (segment_size, dot_block_size, 1)
+
+    textconf.update({
+        'gsize': gsize,
+        'lsize': lsize,
+        'n_items': len(items),
+        'segment_size': segment_size,
+        'dot_block_size': dot_block_size,
+        'max_y_len': max_y_len,
+        'n_locals': segment_size * dot_block_size,
+        #'segment_idx': 'get_local_id(0)',
+        #'dot_block_idx': 'get_local_id(1)',
+        'segment_idx': 'segment_idx',
+        'dot_block_idx': 'dot_block_idx',
+        })
+    if 0:
+        for k, v in textconf.items():
+            print k, v
+    textconf.update(p.__dict__)
+    #    print 'float_gamma', textconf['float_gamma']
+    #    print 'cl_gamma', textconf['cl_gamma']
+    #    print 'clra_gamma', textconf['clra_gamma']
+
+    #int local_idx = get_local_id(0) + get_local_size(0) * get_local_id(1);
+    #
+    # WORKGROUP SHAPE: N_i=max-x-len, dot-block-size, segment-size
+    #
+    text = """
+        __kernel void fn(
+            const __global int *gstructure,
+            const __global ${A.cl_buf.ocldtype} *A_data,
+            const __global ${X.cl_buf.ocldtype} *X_data,
+            % if cl_beta is not None:
+            const __global ${cl_beta.ocldtype} * betas,
+            % endif
+            const __global ${Y_in.cl_buf.ocldtype} *Y_in_data,
+            __global ${Y.cl_buf.ocldtype} *Y_data)
+    {
+        __local ${X.cl_buf.ocldtype} lX[${dot_block_size}][${N_i}];
+        __local ${Y.cl_buf.ocldtype} y_sum_pre[${segment_size}];
+        __local ${Y.cl_buf.ocldtype} y_sum_post[${segment_size}][${dot_block_size}][${N_i}];
+        __local int a_start[${dot_block_size}];
+        __local int a_s0[${dot_block_size}];
+        __local int geometry_anchor;
+        int local_idx = get_local_id(0)
+            + get_local_size(0) * get_local_id(1)
+            + get_local_size(0) * get_local_size(1) * get_local_id(2);
+        for (int bb = 0; bb < ${n_items})
+        {
+            geometry_anchor = 0;
+
+            gstructure += get_global_id(2) * ${structure_vars_stride};
+
+            y_sum_post[get_local_id(2)][get_local_id(1)][get_local_id(0)] = 0;
+
+            for (int ii = get_local_id(1);
+                     ii < ${n_dot_products_ubound};
+                     ii += ${dot_block_size})
+            {
+                if (get_local_id(2) == 0)
+                {
+                    lX[get_local_id(1)][get_local_id(0)] = X_data[gstructure[ii] + get_local_id(0)];
+                }
+                if (local_idx < ${dot_block_size})
+                {
+                    a_start[local_idx] = gstructure[1 * ${max_n_dots} + geometry_anchor + local_idx];
+                    a_s0[local_idx] = gstructure[2 * ${max_n_dots} + geometry_anchor + local_idx];
+                }
+                barrier(CLK_LOCAL_MEM_FENCE);
+
+                if (1
+                    && (get_global_id(0) < ${N_i})
+                    && (get_global_id(1) < ${n_dot_products})
+                    && (get_global_id(2) < ${y_len}))
+                {
+                    y_sum_post[get_local_id(2)][get_local_id(1)][get_local_id(0)]
+                        += A_data[a_start[get_local_id(1)]
+                                  + get_global_id(2) * a_s0[get_local_id(1)]
+                                  + get_local_id(0)]
+                         * lX[get_local_id(0)];
+                }
+                geometry_anchor += ${dot_block_size};
+                barrier(CLK_LOCAL_MEM_FENCE);
+            }
+            barrier(CLK_LOCAL_MEM_FENCE);
+            if ((get_global_id(2) < ${y_len}) && (get_local_id(0) == 0) && (get_local_id(1) == 0))
+            {
+                for (int ii = 1; ii < ${dot_block_size}; ++ii)
+                {
+                    for (int jj = 1; jj < ${N_i}; ++jj)
+                    {
+                        y_sum_post[get_local_id(2)][0][0] += y_sum_post[get_local_id(2)][ii][jj];
+                    }
+                }
+                Y_data[${y_offset} + get_global_id(2)]
+                    = y_sum_pre[get_local_id(2)]
+                      + ${float_alpha} * y_sum_post[get_local_id(2)][0][0];
+            }
         }
     }
         """
