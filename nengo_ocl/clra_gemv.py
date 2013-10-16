@@ -208,6 +208,7 @@ class gemv_prog(object):
 
         textconf = {
             'n_structure_vars': n_structure_vars,
+            'max_n_dots': max_n_dots,
             'structure_vars_stride': structure_vars_stride,
             'x_starts': 'lstructure[0 * %s + ii]' % max_n_dots,
             'a_starts': 'lstructure[1 * %s + ii]' % max_n_dots,
@@ -220,6 +221,10 @@ class gemv_prog(object):
             'bb'   : 'lstructure[4 * %s + 4]' % max_n_dots,
             }
         return cl_gstructure, textconf
+
+    def __call__(self):
+        for p in self.plans:
+            p()
 
 
 def ref_impl(p, items):

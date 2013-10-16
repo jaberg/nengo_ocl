@@ -1,4 +1,5 @@
 import math
+import numpy as np
 from itertools import chain
 import pyopencl as cl
 
@@ -32,16 +33,9 @@ def padsize(a, q):
         }
 
                  * lX[get_local_id(0)];
-"""
 
-kernel_template = """
-    __kernel void fn(
-        const __global int *gstructure,
-        const __global ${A.cl_buf.ocldtype} *A_data,
-        __global ${Y.cl_buf.ocldtype} *Y_data)
-{
     __local ${Y.cl_buf.ocldtype} y_sum_post[${segment_size}][${dot_block_size}][${N_i}];
-    __local int y_len;
+    __local int y_len, y_offset;
     __local int a_start[${dot_block_size}];
     __local int a_s0[${dot_block_size}];
 
@@ -49,9 +43,9 @@ kernel_template = """
     __local int n_dot_products;
 % endif
 
-    int local_idx = get_local_id(0)
-        + get_local_size(0) * get_local_id(1)
-        + get_local_size(0) * get_local_size(1) * get_local_id(2);
+    int local_idx = get_local_id(2)
+        + get_local_size(2) * get_local_id(1)
+        + get_local_size(2) * get_local_size(1) * get_local_id(0);
     // int bb = 0;  // XXX: handle multiple output vectors
 
     // XXX: if possible, use one wavefront to read this
@@ -65,8 +59,17 @@ kernel_template = """
       n_dot_products = gstructure[0 * ${structure_vars_stride} + 4 * ${max_n_dots} + 2]
 % endif
       y_len = gstructure[0 * ${structure_vars_stride} + 4 * ${max_n_dots} + 3];
+      y_offset = get_global_id(2);
     }
     y_sum_post[get_local_id(2)][get_local_id(1)][get_local_id(0)] = 0;
+
+
+        if (local_idx < ${dot_block_size})
+        {
+            a_start[local_idx] = gstructure[1 * ${max_n_dots} + local_idx];
+            a_s0[local_idx] = gstructure[2 * ${max_n_dots} + local_idx];
+        }
+        barrier(CLK_LOCAL_MEM_FENCE);
 
 % if n_dot_products_ubound > dot_block_size :
     for (int ii = get_local_id(1);
@@ -77,13 +80,34 @@ kernel_template = """
     {
 % endif
 
-        if (local_idx < ${dot_block_size})
-        {
-            a_start[local_idx] = gstructure[1 * ${max_n_dots} + local_idx];
-            a_s0[local_idx] = gstructure[2 * ${max_n_dots} + local_idx];
-        }
+% if n_dot_products_ubound > dot_block_size :
         barrier(CLK_LOCAL_MEM_FENCE);
+    }
+% else:
+    }
+% endif
 
+// short reduction XXX: use an log-time reduce
+    barrier(CLK_LOCAL_MEM_FENCE);
+
+    if ((get_global_id(2) < y_len) && (get_local_id(0) == 0) && (get_local_id(1) == 0))
+    {
+% for ii in range(0, dot_block_size):
+%    for jj in range(0, N_i):
+%        if not (ii == jj == 0):
+            y_sum_post[get_local_id(2)][0][0]
+            += y_sum_post[get_local_id(2)][${ii}][${jj}];
+%        endif
+%    endfor
+% endfor
+    }
+
+// write
+    barrier(CLK_LOCAL_MEM_FENCE);
+    if ((local_idx < get_local_size(2)) && (y_offset + local_idx < y_len))
+    {
+        //XXX need to use global position!
+    }
         if (1
             && (get_global_id(0) < ${N_i})
 % if n_dot_products is None:
@@ -93,40 +117,84 @@ kernel_template = """
 % endif
             && (get_global_id(2) < y_len))
         {
+
             y_sum_post[get_local_id(2)][get_local_id(1)][get_local_id(0)]
-                += A_data[a_start[get_local_id(1)]
-                          + get_global_id(2) * a_s0[get_local_id(1)]
-                          + get_local_id(0)];
-        }
-% if n_dot_products_ubound > dot_block_size :
-        barrier(CLK_LOCAL_MEM_FENCE);
+// write
+    barrier(CLK_LOCAL_MEM_FENCE);
+    if ((local_idx < get_local_size(2)) && (y_offset + local_idx < y_len))
+    {
+        //XXX need to use global position!
     }
+        if (1
+            && (get_global_id(0) < ${N_i})
+% if n_dot_products is None:
+            && (get_global_id(1) < n_dot_products)
 % else:
-    }
+            && (get_global_id(1) < ${n_dot_products})
 % endif
+            && (get_global_id(2) < y_len))
+        {
+
+            y_sum_post[get_local_id(2)][get_local_id(1)][get_local_id(0)]
+
+"""
+
+kernel_template_2 = """
+    __kernel void fn(
+        const __global ${A.cl_buf.ocldtype} *A_data,
+        __global ${Y.cl_buf.ocldtype} *Y_data)
+{
+    __local float buf[16][16];
+
+    for (int ii = get_global_id(1); ii < 1600000; ii += get_global_size(1))
+    {
+        buf[get_local_id(0)][get_local_id(1)] = A_data[ii * 16 + get_local_id(0)];
+
+        Y_data[ii] = ${float_alpha} * buf[get_local_id(0)][get_local_id(1)];
+    }
+}
+"""
+
+kernel_template_3 = """
+    __kernel void fn(
+        const __global ${A.cl_buf.ocldtype} *A_data,
+        __global ${Y.cl_buf.ocldtype} *Y_data)
+{
+    __local float buf[${segment_size}][${N_i} * ${dot_block_size}];
+    __local int y_offset;
+
+    int local_idx = get_local_id(0)
+        + get_local_size(0) * get_local_id(1)
+        + get_local_size(0) * get_local_size(1) * get_local_id(2);
+    int per_segment_idx = get_local_id(0)
+        + get_local_size(0) * get_local_id(1);
+
+    for (int ii = get_global_id(2); ii < 1600000 * 8; ii += get_global_size(2))
+    {
+        if (local_idx == 0)
+        {
+            y_offset = ii;
+        }
+        buf[get_local_id(2)][get_local_id(1) * ${N_i} + get_local_id(0)]
+        = A_data[ii * 2 + get_local_id(0)];
 
 
 // short reduction XXX: use an log-time reduce
-    barrier(CLK_LOCAL_MEM_FENCE);
+        barrier(CLK_LOCAL_MEM_FENCE);
 
-    if ((get_global_id(2) < y_len) && (get_local_id(0) == 0) && (get_local_id(1) == 0))
-    {
-% for ii in range(1, dot_block_size):
-%    for jj in range(1, N_i):
-         y_sum_post[get_local_id(2)][0][0]
-         += y_sum_post[get_local_id(2)][${ii}][${jj}];
-%    endfor
+% for log2stride in range(n_reduce_steps):
+        if (per_segment_idx + ${2 ** log2stride} < ${dot_block_size * N_i})
+        {
+        buf[get_local_id(2)][per_segment_idx]
+            += buf[get_local_id(2)][per_segment_idx + ${2 ** log2stride}];
+        }
+        barrier(CLK_LOCAL_MEM_FENCE);
 % endfor
-    }
-
-// write
-    barrier(CLK_LOCAL_MEM_FENCE);
-    if (local_idx < y_len)
-    {
-        //XXX need to use global position!
-        Y_data[local_idx]
-            = 0.0 // XXX y_sum_pre[local_idx]
-            + ${float_alpha} * y_sum_post[local_idx][0][0];
+        if (local_idx < ${segment_size})
+        {
+            Y_data[y_offset + local_idx] = ${float_alpha} * buf[local_idx][0];
+        }
+        barrier(CLK_LOCAL_MEM_FENCE);
     }
 }
 """
@@ -154,22 +222,25 @@ def plan0_impl(p, items):
     except IndexError:
         n_dot_products = None
 
-    MAX_SEGMENT_SIZE = 8 # tricky to tune?
+    MAX_SEGMENT_SIZE = 16 # tricky to tune?
 
     segment_size = min(
         max_y_len,
         MAX_SEGMENT_SIZE)
     dot_block_size = min(
         max_n_dots,
-        int(p.queue.device.max_work_group_size / segment_size),
+        int(p.queue.device.max_work_group_size
+            / segment_size
+            / N_i),
         )
 
     n_dot_blocks, n_dot_products_ubound = padsize(max_n_dots, dot_block_size)
 
     n_segments, ylen_ubound = padsize(max_y_len, segment_size)
-    gsize = (N_i, dot_block_size, ylen_ubound)
+    gsize = (N_i, dot_block_size, min(500 * segment_size, ylen_ubound))
     lsize = (N_i, dot_block_size, segment_size)
-    print gsize, lsize
+
+    n_reduce_steps = int(math.ceil(np.log2(dot_block_size * N_i)))
 
     textconf.update({
         'gsize': gsize,
@@ -181,19 +252,27 @@ def plan0_impl(p, items):
         'max_y_len': max_y_len,
         'n_dot_products_ubound': n_dot_products_ubound,
         'n_dot_products': n_dot_products,
+        'n_reduce_steps': n_reduce_steps,
         })
     if 1:
         for k, v in textconf.items():
             print k, v
     textconf.update(p.__dict__)
 
-    text = Template(kernel_template, output_encoding='ascii').render(
-        **textconf)
+    if 0:
+        gsize = (16, 1600)
+        lsize = (16, 16)
+
+        text = Template(kernel_template_2, output_encoding='ascii').render(
+            **textconf)
+    else:
+        text = Template(kernel_template_3, output_encoding='ascii').render(
+            **textconf)
 
     fn = cl.Program(p.queue.context, text).build().fn
 
     full_args = [
-                 cl_gstructure,
+                 #cl_gstructure,
                  p.A.cl_buf,
                  #p.X.cl_buf,
                  ]

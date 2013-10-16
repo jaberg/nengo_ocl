@@ -12,14 +12,29 @@ class BasePlan(object):
                 ):
         self.name = name
         self.tag = tag
-        self.atimes = []
-        self.btimes = []
-        self.ctimes = []
-        self.n_calls = 0
+        self.reset_profile()
         # -- floating-point ops per call
         self.flops_per_call = flops_per_call
         # -- bandwidth requirement per call
         self.bw_per_call = bw_per_call
+
+    def reset_profile(self):
+        self.atimes = []
+        self.btimes = []
+        self.ctimes = []
+        self.n_calls = 0
+
+    @property
+    def avg_gflops_per_sec(self):
+        return (self.n_calls
+            * self.flops_per_call
+            / (sum(self.ctimes) * 1.0e9))
+
+    @property
+    def avg_bw_per_call(self):
+        return (self.n_calls
+            * self.bw_per_call
+            / (sum(self.ctimes) * 1.0e9))
 
     def __str__(self):
         return '%s{%s %s}' % (

@@ -1,3 +1,4 @@
+import os
 import sys
 
 import numpy as np
@@ -14,7 +15,11 @@ from nengo_ocl.test.test_clra_gemv import (
         ctx,
         allclose)
 from nengo_ocl.clra_gemv_0 import plan_gemv0
+from nengo_ocl.clra_gemv import plan_ref
+from nengo_ocl.clra_gemv import plan_many_dots
 
+PROFILING_ENABLE = cl.command_queue_properties.PROFILING_ENABLE
+profiling = int(os.getenv("NENGO_OCL_PROFILING", 0))
 
 class TestGemv0(unittest.TestCase, ShapeCheckMixin):
 
@@ -27,8 +32,10 @@ class TestGemv0(unittest.TestCase, ShapeCheckMixin):
         beta = 0.0
         gamma = 0.0
 
-        A_shapes = [(16, 1)]
-        X_shapes = [(1, 1)]
+        M, N = 1600000 * 8, 2
+
+        A_shapes = [(M, N)]
+        X_shapes = [(N, 1)]
         A_js = [[0]]
         X_js = [[0]]
 
@@ -42,7 +49,12 @@ class TestGemv0(unittest.TestCase, ShapeCheckMixin):
         A_js = RA(A_js)
         X_js = RA(X_js)
         # -- prepare initial conditions on device
-        queue = cl.CommandQueue(ctx)
+        if profiling:
+            queue = cl.CommandQueue(
+                    ctx,
+                    properties=PROFILING_ENABLE)
+        else:
+            queue = cl.CommandQueue(ctx)
         clA = CLRA(queue, A)
         clX = CLRA(queue, X)
         clY = CLRA(queue, Y)
@@ -59,7 +71,17 @@ class TestGemv0(unittest.TestCase, ShapeCheckMixin):
             queue, alpha, clA, clA_js, clX, clX_js, beta, clY,
             gamma=gamma)
 
-        plan()
+        plan.plans[0].reset_profile()
+        for ii in range(10):
+            plan()
+        plan.plans[0].update_from_enqueued_events(True)
+        print plan.plans[0].bw_per_call
+        print 'simple profile output for %s: GFLOP/s=%.2f GB/s=%.2f' % (
+                plan.plans[0].name,
+                plan.plans[0].avg_gflops_per_sec,
+                plan.plans[0].avg_bw_per_call)
+        print 'all ctimes', plan.plans[0].ctimes
+        print 'mean ctime', np.mean(plan.plans[0].ctimes)
 
         # -- ensure they match
         for i in xrange(len(A_js)):
