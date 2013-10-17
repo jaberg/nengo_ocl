@@ -5,6 +5,7 @@ import pyopencl as cl
 
 from mako.template import Template
 
+from clarray import to_device
 from plan import Plan
 from clra_gemv import (
     gemv_prog,
@@ -201,11 +202,12 @@ kernel_template_3 = """
 kernel_template_4 = """
     __kernel void fn(
         const __global int *gstructure,
+        const __global int *ii_lims,
         const __global ${A.cl_buf.ocldtype} *A_data,
         __global ${Y.cl_buf.ocldtype} *Y_data)
 {
     __local float buf[${segment_size}][${N_i} * ${dot_block_size}];
-    __local int y_len, y0_offset, y_offset, a_s0, a_start;
+    __local int y_len, y0_offset, y_offset, a_s0, a_start, local_ii_lim;
 
     int local_idx = get_local_id(0)
         + get_local_size(0) * get_local_id(1)
@@ -228,11 +230,12 @@ kernel_template_4 = """
                 bb * ${structure_vars_stride} + 1 * ${max_n_dots} + 0];
             a_s0 = gstructure[
                 bb * ${structure_vars_stride} + 2 * ${max_n_dots} + 0];
+            local_ii_lim = ii_lims[bb];
         }
         barrier(CLK_LOCAL_MEM_FENCE);
 
         for (int ii = ii0;
-                 ii < (int)(ceil(y_len / (float)(${segment_size}))) * ${segment_size};
+                 ii < local_ii_lim;
                  ii += ${segments_per_y * segment_size})
         {
             if (local_idx == 0)
@@ -358,11 +361,17 @@ def plan0_impl(p, items):
 
     fn = cl.Program(p.queue.context, text).build().fn
 
+    ii_lims = [
+        math.ceil(p.geometry[ii]['y_len'] / float(segment_size)) * segment_size
+        for ii in items]
+    cl_ii_lims = to_device(p.queue, np.asarray(ii_lims, dtype='int32'))
+
     full_args = [
-                 cl_gstructure,
-                 p.A.cl_buf,
-                 #p.X.cl_buf,
-                 ]
+        cl_gstructure,
+        cl_ii_lims,
+        p.A.cl_buf,
+        #p.X.cl_buf,
+        ]
     #if p.cl_beta is not None:
         #full_args += [p.cl_beta]
     full_args += [
