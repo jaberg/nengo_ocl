@@ -179,7 +179,6 @@ kernel_template_3 = """
         = A_data[ii * 2 + get_local_id(0)];
 
 
-// short reduction XXX: use an log-time reduce
         barrier(CLK_LOCAL_MEM_FENCE);
 
 % for log2stride in range(n_reduce_steps):
@@ -195,6 +194,78 @@ kernel_template_3 = """
             Y_data[y_offset + local_idx] = ${float_alpha} * buf[local_idx][0];
         }
         barrier(CLK_LOCAL_MEM_FENCE);
+    }
+}
+"""
+
+kernel_template_4 = """
+    __kernel void fn(
+        const __global int *gstructure,
+        const __global ${A.cl_buf.ocldtype} *A_data,
+        __global ${Y.cl_buf.ocldtype} *Y_data)
+{
+    __local float buf[${segment_size}][${N_i} * ${dot_block_size}];
+    __local int y_len, y_offset, a_s0;
+
+    int local_idx = get_local_id(0)
+        + get_local_size(0) * get_local_id(1)
+        + get_local_size(0) * get_local_size(1) * get_local_id(2);
+    int per_segment_idx = get_local_id(0)
+        + get_local_size(0) * get_local_id(1);
+    int bb0 = get_global_id(2) / ${segments_per_y * segment_size};
+    int ii0 = get_global_id(2) % ${segments_per_y * segment_size};
+
+    for (int bb = bb0; bb < ${n_items}; bb += ${item_skip})
+    {
+        if (local_idx == 0)
+        {
+            y_len = gstructure[
+                bb * ${structure_vars_stride} + 4 * ${max_n_dots} + 3];
+            // XXX: PUT INSIDE LOOP OVER DOTS
+            a_s0 = gstructure[
+                bb * ${structure_vars_stride} + 2 * ${max_n_dots} + 0];
+        }
+        barrier(CLK_LOCAL_MEM_FENCE);
+
+        for (int ii = ii0;
+                 ii < (int)(ceil(y_len / (float)(${segment_size}))) * ${segment_size};
+                 ii += ${segments_per_y * segment_size})
+        {
+            if (local_idx == 0)
+            {
+                y_offset = ii;
+            }
+            if (ii < y_len)
+            {
+                buf[get_local_id(2)][get_local_id(1) * ${N_i} + get_local_id(0)]
+                   // XXX: USE a_offset
+                    = A_data[ii * a_s0 + get_local_id(0)];
+            }
+            else
+            {
+                buf[get_local_id(2)][get_local_id(1) * ${N_i} + get_local_id(0)]
+                    = 0;
+            }
+            barrier(CLK_LOCAL_MEM_FENCE);
+
+% for log2stride in range(n_reduce_steps):
+            if (per_segment_idx + ${2 ** log2stride} < ${dot_block_size * N_i})
+            {
+                buf[get_local_id(2)][per_segment_idx]
+                    += buf[get_local_id(2)][per_segment_idx + ${2 ** log2stride}];
+            }
+            barrier(CLK_LOCAL_MEM_FENCE);
+% endfor
+
+            if ((y_offset + local_idx < y_len)
+                && (local_idx < ${segment_size}))
+            {
+                //printf("%i\\n", y_offset);
+                Y_data[y_offset + local_idx]
+                  = ${float_alpha} * buf[local_idx][0];
+            }
+            barrier(CLK_LOCAL_MEM_FENCE);
+        }
     }
 }
 """
@@ -222,7 +293,9 @@ def plan0_impl(p, items):
     except IndexError:
         n_dot_products = None
 
-    MAX_SEGMENT_SIZE = 16 # tricky to tune?
+    MAX_SEGMENT_SIZE = 16 # HYPER
+    MAX_ITEM_SKIP = 8 # HYPER
+    MAX_SEGMENTS_IN_FLIGHT = 500
 
     segment_size = min(
         max_y_len,
@@ -234,10 +307,13 @@ def plan0_impl(p, items):
             / N_i),
         )
 
+    item_skip = min(MAX_ITEM_SKIP, len(items))
+
     n_dot_blocks, n_dot_products_ubound = padsize(max_n_dots, dot_block_size)
 
     n_segments, ylen_ubound = padsize(max_y_len, segment_size)
-    gsize = (N_i, dot_block_size, min(500 * segment_size, ylen_ubound))
+    segments_per_y = min(n_segments, MAX_SEGMENTS_IN_FLIGHT / item_skip)
+    gsize = (N_i, dot_block_size, segment_size * segments_per_y * item_skip)
     lsize = (N_i, dot_block_size, segment_size)
 
     n_reduce_steps = int(math.ceil(np.log2(dot_block_size * N_i)))
@@ -253,6 +329,8 @@ def plan0_impl(p, items):
         'n_dot_products_ubound': n_dot_products_ubound,
         'n_dot_products': n_dot_products,
         'n_reduce_steps': n_reduce_steps,
+        'segments_per_y': segments_per_y,
+        'item_skip': item_skip,
         })
     if 1:
         for k, v in textconf.items():
@@ -265,14 +343,17 @@ def plan0_impl(p, items):
 
         text = Template(kernel_template_2, output_encoding='ascii').render(
             **textconf)
-    else:
+    elif 0:
         text = Template(kernel_template_3, output_encoding='ascii').render(
+            **textconf)
+    else:
+        text = Template(kernel_template_4, output_encoding='ascii').render(
             **textconf)
 
     fn = cl.Program(p.queue.context, text).build().fn
 
     full_args = [
-                 #cl_gstructure,
+                 cl_gstructure,
                  p.A.cl_buf,
                  #p.X.cl_buf,
                  ]
@@ -282,6 +363,7 @@ def plan0_impl(p, items):
                  #p.Y_in.cl_buf,
                  p.Y.cl_buf,
                 ]
+    print gsize, lsize
 
     fn.set_args(*[arr.data for arr in full_args])
     rval = Plan(p.queue, fn, gsize, lsize,

@@ -33,6 +33,8 @@ class TestGemv0(unittest.TestCase, ShapeCheckMixin):
         gamma = 0.0
 
         M, N = 1600000 * 8, 2
+        #M, N = 16, 2
+        #M, N = 35, 2
 
         A_shapes = [(M, N)]
         X_shapes = [(N, 1)]
