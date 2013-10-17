@@ -205,7 +205,7 @@ kernel_template_4 = """
         __global ${Y.cl_buf.ocldtype} *Y_data)
 {
     __local float buf[${segment_size}][${N_i} * ${dot_block_size}];
-    __local int y_len, y_offset, a_s0;
+    __local int y_len, y0_offset, y_offset, a_s0, a_start;
 
     int local_idx = get_local_id(0)
         + get_local_size(0) * get_local_id(1)
@@ -215,6 +215,8 @@ kernel_template_4 = """
     int bb0 = get_global_id(2) / ${segments_per_y * segment_size};
     int ii0 = get_global_id(2) % ${segments_per_y * segment_size};
 
+    //printf("bb, local_idx: %i %i\\n", bb0, local_idx);
+
     for (int bb = bb0; bb < ${n_items}; bb += ${item_skip})
     {
         if (local_idx == 0)
@@ -222,6 +224,8 @@ kernel_template_4 = """
             y_len = gstructure[
                 bb * ${structure_vars_stride} + 4 * ${max_n_dots} + 3];
             // XXX: PUT INSIDE LOOP OVER DOTS
+            a_start = gstructure[
+                bb * ${structure_vars_stride} + 1 * ${max_n_dots} + 0];
             a_s0 = gstructure[
                 bb * ${structure_vars_stride} + 2 * ${max_n_dots} + 0];
         }
@@ -233,13 +237,15 @@ kernel_template_4 = """
         {
             if (local_idx == 0)
             {
-                y_offset = ii;
+                y0_offset = gstructure[bb * ${structure_vars_stride}
+                                           + 4 * ${max_n_dots} + 1];
+                y_offset = ii; 
             }
             if (ii < y_len)
             {
                 buf[get_local_id(2)][get_local_id(1) * ${N_i} + get_local_id(0)]
                    // XXX: USE a_offset
-                    = A_data[ii * a_s0 + get_local_id(0)];
+                    = A_data[a_start + ii * a_s0 + get_local_id(0)];
             }
             else
             {
@@ -257,11 +263,11 @@ kernel_template_4 = """
             barrier(CLK_LOCAL_MEM_FENCE);
 % endfor
 
-            if ((y_offset + local_idx < y_len)
+            if (   (y_offset + local_idx < y_len)
                 && (local_idx < ${segment_size}))
             {
-                //printf("%i\\n", y_offset);
-                Y_data[y_offset + local_idx]
+                //printf("y_offset: %i %i %i\\n", y_offset, bb0, local_idx);
+                Y_data[y0_offset + y_offset + local_idx]
                   = ${float_alpha} * buf[local_idx][0];
             }
             barrier(CLK_LOCAL_MEM_FENCE);

@@ -32,14 +32,15 @@ class TestGemv0(unittest.TestCase, ShapeCheckMixin):
         beta = 0.0
         gamma = 0.0
 
-        M, N = 1600000 * 8, 2
-        #M, N = 16, 2
+        L = 8
+        M, N = 1600000, 2
         #M, N = 35, 2
+        #M, N = 16, 2
 
-        A_shapes = [(M, N)]
-        X_shapes = [(N, 1)]
-        A_js = [[0]]
-        X_js = [[0]]
+        A_shapes = [(M, N)] * L
+        X_shapes = [(N, 1)] * L
+        A_js = [[i] for i in range(L)]
+        X_js = [[i] for i in range(L)]
 
         rng = np.random.RandomState(1234)
         A = RA([0.1 + rng.rand(*shp) for shp in A_shapes])
@@ -99,6 +100,7 @@ class TestGemv0(unittest.TestCase, ShapeCheckMixin):
                  for aj, xj in zip(A_js[i], X_js[i])])
             sim = clY[i]
             if not np.allclose(ref, sim, atol=1e-3, rtol=1e-3):
+                print 'WRONG answer in position', i
                 print 'A_shapes',  A_shapes
                 print 'X_shapes', X_shapes
                 if len(ref) > 20:
