@@ -73,9 +73,9 @@ class TestGemv0(unittest.TestCase, ShapeCheckMixin):
         assert allclose(X_js, clX_js)
 
         # -- run cl computation
-        planner = plan_gemv0
         planner = plan_ref
         planner = plan_many_dots
+        planner = plan_gemv0
         plan = planner(
             queue, alpha, clA, clA_js, clX, clX_js, beta, clY,
             gamma=gamma)

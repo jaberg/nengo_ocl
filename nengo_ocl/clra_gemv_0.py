@@ -210,8 +210,12 @@ kernel_template_4 = """
     __local float buf[${segment_size}][${N_i} * ${dot_block_size}];
     __local int n_dot_products_bound, n_dot_products;
     __local y_len, y0_offset, y_offset, local_ii_lim;
+%if shared_a_coords:
     __local int a_start[${dot_block_size}];
     __local int a_s0[${dot_block_size}];
+% else:
+    int a_start, a_s0;
+% endif
 
     int local_idx = get_local_id(0)
         + get_local_size(0) * get_local_id(1)
@@ -250,6 +254,7 @@ kernel_template_4 = """
             //printf("n_dots_bound: %i\\n", n_dot_products_bound);
             for (int jj = get_local_id(1); jj < n_dot_products_bound; jj += get_local_size(1))
             {
+% if shared_a_coords:
                 if ((get_local_id(0) == 0)  && (get_local_id(2) == 0))
                 {
                     a_start[get_local_id(1)] = gstructure[
@@ -265,6 +270,15 @@ kernel_template_4 = """
                                   + ii * a_s0[get_local_id(1)]
                                   + get_local_id(0)];
                 }
+% else:
+                a_start = gstructure[bb * ${structure_vars_stride} + 1 * ${max_n_dots} + jj];
+                a_s0 = gstructure[bb * ${structure_vars_stride} + 2 * ${max_n_dots} + jj];
+                if ((jj < n_dot_products) && (ii < y_len))
+                {
+                    buf[get_local_id(2)][get_local_id(1) * ${N_i} + get_local_id(0)]
+                        += A_data[a_start + ii * a_s0 + get_local_id(0)];
+                }
+% endif
                 barrier(CLK_LOCAL_MEM_FENCE);
             }
 
@@ -313,7 +327,12 @@ def plan0_impl(p, items):
     except IndexError:
         n_dot_products = None
 
-    MAX_SEGMENT_SIZE = 16 # HYPER
+    # XXX THESE DEFAULTS CAN'T BE SET REASONABLY
+    #     The best parameters depend strongly on the problem configuration.
+    #     E.g.
+    #        * register use vs. local variables
+    #        * max segment size should be big, but not at expense of occupancy
+    MAX_SEGMENT_SIZE = 8 # HYPER
     MAX_ITEM_SKIP = 8 # HYPER
     MAX_SEGMENTS_IN_FLIGHT = 500
 
@@ -351,6 +370,7 @@ def plan0_impl(p, items):
         'n_reduce_steps': n_reduce_steps,
         'segments_per_y': segments_per_y,
         'item_skip': item_skip,
+        'shared_a_coords': False,
         })
     if 1:
         for k, v in textconf.items():
