@@ -32,20 +32,22 @@ class TestGemv0(unittest.TestCase, ShapeCheckMixin):
         beta = 0.0
         gamma = 0.0
 
-        L = 8
+        K = 1000
+        L = 1
         #M, N = 1600000, 2
         M, N = 2000, 2
         #M, N = 35, 2
         #M, N = 16, 2
+        #M, N = 4, 2
 
         A_shapes = [(M, N)] * L
         X_shapes = [(N, 1)] * L
-        A_js = [[i] for i in range(L)]
-        X_js = [[i] for i in range(L)]
+        A_js = [[(i + kk) % L for kk in range(K)] for i in range(L)]
+        X_js = [[(i + kk + 3) % L for kk in range(K)] for i in range(L)]
 
         rng = np.random.RandomState(1234)
         A = RA([0.1 + rng.rand(*shp) for shp in A_shapes])
-        X = RA([np.ones(shp) for shp in X_shapes])  #DEBUG
+        X = RA([np.ones(shp) for shp in X_shapes])  #DEBUG XXX
         Y = RA([0.1 + rng.rand(
             A_shapes[A_js[ii][0]][0],
             X_shapes[X_js[ii][0]][1])
@@ -71,7 +73,10 @@ class TestGemv0(unittest.TestCase, ShapeCheckMixin):
         assert allclose(X_js, clX_js)
 
         # -- run cl computation
-        plan = plan_gemv0(
+        planner = plan_gemv0
+        planner = plan_ref
+        planner = plan_many_dots
+        plan = planner(
             queue, alpha, clA, clA_js, clX, clX_js, beta, clY,
             gamma=gamma)
 
