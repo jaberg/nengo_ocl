@@ -27,6 +27,10 @@ class TestGemv0(unittest.TestCase, ShapeCheckMixin):
         return check_from_shapes(plan_gemv0 *args, **kwargs)
 
 
+    # XXX MAX SEGMENT SIZE seems to give wrong answer
+    #     for some values that aren't powers of 2. Why?
+
+
     def test_read_a(self):
         alpha = 1.0
         beta = 0.0
